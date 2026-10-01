@@ -105,11 +105,19 @@ function sessionBelongsToWorkspace(sessionId: string, worktreeId: string): boole
 function liveSleepingAgentClaims(
   store: ActivationStore,
   worktreeId: string,
-  livePtyIds: ReadonlySet<string>,
+  liveSessions: readonly PtyListedSession[],
   structuredInventory: StructuredActivationInventory | null
 ): { keys: Set<string>; claimedPtyIds: Set<string> } {
   const keys = new Set<string>()
   const claimedPtyIds = new Set<string>()
+  const livePtyIds = new Set(liveSessions.map((session) => session.id))
+  // Why: a PTY another client spawned keeps that client's pane key, which the agent reports from,
+  // even after this renderer adopts the PTY onto a tab of its own with no layout for that pane.
+  const livePtyIdBySpawnPaneKey = new Map(
+    liveSessions.flatMap((session) =>
+      session.paneKey ? [[session.paneKey, session.id] as const] : []
+    )
+  )
   for (const record of Object.values(store.sleepingAgentSessionsByPaneKey)) {
     if (record.worktreeId !== worktreeId) {
       continue
@@ -129,8 +137,12 @@ function liveSleepingAgentClaims(
       continue
     }
     const persistedPtyId = layoutPtyId ?? (tabPtyIds?.length === 1 ? tabPtyIds[0] : undefined)
-    if (persistedPtyId && livePtyIds.has(persistedPtyId)) {
-      claimedPtyIds.add(persistedPtyId)
+    const livePtyId =
+      persistedPtyId && livePtyIds.has(persistedPtyId)
+        ? persistedPtyId
+        : livePtyIdBySpawnPaneKey.get(record.paneKey)
+    if (livePtyId) {
+      claimedPtyIds.add(livePtyId)
       keys.add(getProviderSessionClaimKey(record))
     }
   }
@@ -223,7 +235,7 @@ export async function runWorktreeAgentActivationGate(
   const claims = liveSleepingAgentClaims(
     store,
     worktreeId,
-    liveWorkspacePtyIds,
+    liveWorkspaceSessions,
     structuredInventory
   )
   const hasUnclaimedRecovery = Object.values(store.sleepingAgentSessionsByPaneKey).some(

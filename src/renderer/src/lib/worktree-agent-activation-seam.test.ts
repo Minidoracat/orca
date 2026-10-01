@@ -104,6 +104,10 @@ function orphanTerminalRow(
 function stubInventory(args?: {
   structured?: boolean
   livePtyId?: string
+  /** A fresh agent launch registers no owner claim, so its PTY lists as 'absent'. */
+  agentOwnership?: 'present' | 'absent'
+  /** Pane key the host recorded when it spawned the live PTY. */
+  spawnPaneKey?: string
   /** Host that could not produce a complete census for the workspace it was asked about. */
   unverifiableCensus?: boolean
 }): {
@@ -149,7 +153,8 @@ function stubInventory(args?: {
             id: args.livePtyId,
             cwd: worktree.path,
             title: 'Codex',
-            agentOwnership: 'present' as const
+            agentOwnership: args.agentOwnership ?? ('present' as const),
+            ...(args.spawnPaneKey ? { paneKey: args.spawnPaneKey } : {})
           }
         ]
       : []
@@ -386,5 +391,38 @@ describe('worktree agent activation seam', () => {
     await expect(waitForWorktreeAgentActivationGateForTests(worktree.id)).resolves.toBe('resumed')
     expect(resume).toHaveBeenCalledExactlyOnceWith(worktree.id, { skipClaimKeys: new Set() })
     expect(listSessions.mock.calls).toEqual([[{ connectionId: 'box' }], [{ connectionId: 'box' }]])
+  })
+
+  // A client that launches an agent for its own tab gives it that pane key, so this renderer holds a
+  // sleeping record for a pane it never had, and adopts the unowned PTY onto a tab of its own.
+  it('does not fork an agent from a pane this renderer never had onto its adopted PTY', async () => {
+    const worktree = makeWorktree()
+    const livePtyId = `${worktree.id}@@other-client-omp`
+    const record = {
+      paneKey: 'other-client-tab:22222222-2222-4222-8222-222222222222',
+      tabId: 'other-client-tab',
+      worktreeId: worktree.id,
+      agent: 'omp' as const,
+      providerSession: { key: 'session_id' as const, id: 'other-client-omp-session' },
+      prompt: 'resume',
+      state: 'working' as const,
+      capturedAt: 1,
+      updatedAt: 1
+    }
+    useAppStore.setState({
+      ...baseState(),
+      sleepingAgentSessionsByPaneKey: { [record.paneKey]: record }
+    })
+    stubInventory({ livePtyId, agentOwnership: 'absent', spawnPaneKey: record.paneKey })
+
+    // The second activation finds the PTY already bound to the adopted tab.
+    for (let activation = 0; activation < 2; activation += 1) {
+      activateAndRevealWorktree(worktree.id)
+      await expect(waitForWorktreeAgentActivationGateForTests(worktree.id)).resolves.toBe('adopted')
+    }
+
+    const tabs = useAppStore.getState().tabsByWorktree[worktree.id] ?? []
+    expect(tabs.map((tab) => tab.ptyId)).toEqual([livePtyId])
+    expect(useAppStore.getState().sleepingAgentSessionsByPaneKey[record.paneKey]).toEqual(record)
   })
 })
