@@ -9,6 +9,7 @@ import type {
 import * as sleepingResume from './resume-sleeping-agent-session'
 import { activateAndRevealWorktree } from './worktree-activation'
 import { waitForWorktreeAgentActivationGateForTests } from './worktree-agent-activation-gate'
+import { wakeSleepingAgentsForWorktreeInBackground } from './wake-sleeping-agents-in-background'
 import { makeCreatedAgentWorktree as makeWorktree } from './worktree-activation-created-agent-test-state'
 
 const initialState = useAppStore.getState()
@@ -395,7 +396,7 @@ describe('worktree agent activation seam', () => {
 
   // A client that launches an agent for its own tab gives it that pane key, so this renderer holds a
   // sleeping record for a pane it never had, and adopts the unowned PTY onto a tab of its own.
-  it('does not fork an agent from a pane this renderer never had onto its adopted PTY', async () => {
+  function seedOtherClientAgent() {
     const worktree = makeWorktree()
     const livePtyId = `${worktree.id}@@other-client-omp`
     const record = {
@@ -414,6 +415,11 @@ describe('worktree agent activation seam', () => {
       sleepingAgentSessionsByPaneKey: { [record.paneKey]: record }
     })
     stubInventory({ livePtyId, agentOwnership: 'absent', spawnPaneKey: record.paneKey })
+    return { worktree, livePtyId, record }
+  }
+
+  it('does not fork an agent from a pane this renderer never had onto its adopted PTY', async () => {
+    const { worktree, livePtyId, record } = seedOtherClientAgent()
 
     // The second activation finds the PTY already bound to the adopted tab.
     for (let activation = 0; activation < 2; activation += 1) {
@@ -423,6 +429,16 @@ describe('worktree agent activation seam', () => {
 
     const tabs = useAppStore.getState().tabsByWorktree[worktree.id] ?? []
     expect(tabs.map((tab) => tab.ptyId)).toEqual([livePtyId])
+    expect(useAppStore.getState().sleepingAgentSessionsByPaneKey[record.paneKey]).toEqual(record)
+  })
+
+  it('does not fork that agent when a phone opens the workspace', async () => {
+    const { worktree, record } = seedOtherClientAgent()
+    Object.assign(window, { dispatchEvent: () => true })
+
+    await wakeSleepingAgentsForWorktreeInBackground(worktree.id)
+
+    expect(useAppStore.getState().tabsByWorktree[worktree.id] ?? []).toHaveLength(0)
     expect(useAppStore.getState().sleepingAgentSessionsByPaneKey[record.paneKey]).toEqual(record)
   })
 })
